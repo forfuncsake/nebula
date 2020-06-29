@@ -1,9 +1,13 @@
 package nebula
 
 import (
+	"crypto/tls"
 	"encoding/binary"
 	"fmt"
+	"io"
+	"log"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"strconv"
@@ -101,12 +105,19 @@ func Main(config *Config, configTest bool, block bool, buildVersion string, logg
 	// tun config, listeners, anything modifying the computer should be below
 	////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
-	var tun *Tun
+	var inside Inside
 	if !configTest {
 		config.CatchHUP()
 
-		if tunFd != nil {
-			tun, err = newTunFromFd(
+		// TODO: Add config to create a local SOCKS5 listener, e.g.: `if config.GetBool("tun.socks", false) {`
+		// For initial POC, we'll bake this in.
+		if true {
+			inside, err = newHTTPTransport(
+				tunCidr,
+				config.GetInt("tun.mtu", DEFAULT_MTU),
+			)
+		} else if tunFd != nil {
+			inside, err = newTunFromFd(
 				*tunFd,
 				tunCidr,
 				config.GetInt("tun.mtu", DEFAULT_MTU),
@@ -115,7 +126,7 @@ func Main(config *Config, configTest bool, block bool, buildVersion string, logg
 				config.GetInt("tun.tx_queue", 500),
 			)
 		} else {
-			tun, err = newTun(
+			inside, err = newTun(
 				config.GetString("tun.dev", ""),
 				tunCidr,
 				config.GetInt("tun.mtu", DEFAULT_MTU),
@@ -336,7 +347,7 @@ func Main(config *Config, configTest bool, block bool, buildVersion string, logg
 	pendingDeletionInterval := config.GetInt("timers.pending_deletion_interval", 10)
 	ifConfig := &InterfaceConfig{
 		HostMap:                 hostMap,
-		Inside:                  tun,
+		Inside:                  inside,
 		Outside:                 udpServer,
 		certState:               cs,
 		Cipher:                  config.GetString("cipher", "aes"),
@@ -393,6 +404,47 @@ func Main(config *Config, configTest bool, block bool, buildVersion string, logg
 	if amLighthouse && serveDns {
 		l.Debugln("Starting dns server")
 		go dnsMain(hostMap, config)
+	}
+
+	// POC: baked-in http request
+	if h, ok := inside.(*httpTransport); ok {
+		// Give nebula some time to be ready
+		time.Sleep(time.Second)
+
+		httpClient := http.Client{
+			Transport: &http.Transport{
+				DialContext: h.DialContext,
+				TLSClientConfig: &tls.Config{
+					InsecureSkipVerify: true,
+				},
+			},
+		}
+
+		doRequest := func(path string) {
+			fmt.Println("path: ", path)
+			resp, err := httpClient.Get(path)
+			if err != nil {
+				log.Fatal("http GET error:", err)
+			}
+			defer resp.Body.Close()
+
+			_, err = io.Copy(os.Stdout, resp.Body)
+			if err != nil {
+				log.Fatal("body read err:", err)
+			}
+
+			fmt.Println("")
+		}
+
+		doRequest("http://10.128.0.1/")
+		doRequest("http://10.128.0.1/")
+		doRequest("https://10.128.0.1:4443/")
+
+		// TODO: Something about the TLS connection causes one of the Read
+		// calls to permanently block.. find and fix the race.
+		//doRequest("http://10.128.0.1/")
+
+		fmt.Println("done!")
 	}
 
 	if block {
