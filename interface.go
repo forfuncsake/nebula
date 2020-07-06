@@ -42,6 +42,7 @@ type Interface struct {
 	hostMap            *HostMap
 	outside            *udpConn
 	inside             Inside
+	proxy              *proxyServer
 	certState          *CertState
 	cipher             string
 	firewall           *Firewall
@@ -78,6 +79,7 @@ func NewInterface(c *InterfaceConfig) (*Interface, error) {
 		hostMap:            c.HostMap,
 		outside:            c.Outside,
 		inside:             c.Inside,
+		proxy:              new(proxyServer),
 		certState:          c.certState,
 		cipher:             c.Cipher,
 		firewall:           c.Firewall,

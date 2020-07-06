@@ -14,17 +14,27 @@ func _() {
 	_ = x[lightHouse-3]
 	_ = x[test-4]
 	_ = x[closeTunnel-5]
+	_ = x[proxy-8]
 }
 
-const _NebulaMessageType_name = "handshakemessagerecvErrorlightHousetestcloseTunnel"
+const (
+	_NebulaMessageType_name_0 = "handshakemessagerecvErrorlightHousetestcloseTunnel"
+	_NebulaMessageType_name_1 = "proxy"
+)
 
-var _NebulaMessageType_index = [...]uint8{0, 9, 16, 25, 35, 39, 50}
+var (
+	_NebulaMessageType_index_0 = [...]uint8{0, 9, 16, 25, 35, 39, 50}
+)
 
 func (i NebulaMessageType) String() string {
-	if i >= NebulaMessageType(len(_NebulaMessageType_index)-1) {
+	switch {
+	case i <= 5:
+		return _NebulaMessageType_name_0[_NebulaMessageType_index_0[i]:_NebulaMessageType_index_0[i+1]]
+	case i == 8:
+		return _NebulaMessageType_name_1
+	default:
 		return "NebulaMessageType(" + strconv.FormatInt(int64(i), 10) + ")"
 	}
-	return _NebulaMessageType_name[_NebulaMessageType_index[i]:_NebulaMessageType_index[i+1]]
 }
 func _() {
 	// An "invalid array index" compiler error signifies that the constant values have changed.

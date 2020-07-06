@@ -17,7 +17,7 @@ const (
 	closeTunnel
 	_ // DEPRECATED(testRemote)
 	_ // DEPRECATED(testRemoteReply)
-
+	proxy
 )
 
 const (

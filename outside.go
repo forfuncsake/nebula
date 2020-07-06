@@ -96,9 +96,31 @@ func (f *Interface) readOutsidePackets(addr *udpAddr, out []byte, packet []byte,
 
 		// Fallthrough to the bottom to record incoming traffic
 
-		// Non encrypted messages below here, they should not fall through to avoid tracking incoming traffic since they
-		// are unauthenticated
+	case proxy:
+		f.messageMetrics.Rx(header.Type, header.Subtype, 1)
+		if !f.handleEncrypted(ci, addr, header) {
+			return
+		}
 
+		d, err := f.decrypt(hostinfo, header.MessageCounter, out, packet, header, nb)
+		if err != nil {
+			hostinfo.logger().WithError(err).WithField("udpAddr", addr).
+				WithField("packet", packet).
+				Error("Failed to decrypt proxy packet")
+
+			//TODO: maybe after build 64 is out? 06/14/2018 - NB
+			//f.sendRecvError(net.Addr(addr), header.RemoteIndex)
+			return
+		}
+
+		//TODO:
+		// - enforce firewall rules
+		f.proxy.HandleInboundPacket(f, d)
+
+		// Fallthrough to the bottom to record incoming traffic
+
+	// Non encrypted messages below here, they should not fall through to avoid tracking incoming traffic since they
+	// are unauthenticated
 	case handshake:
 		f.messageMetrics.Rx(header.Type, header.Subtype, 1)
 		HandleIncomingHandshake(f, addr, packet, header, hostinfo)

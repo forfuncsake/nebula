@@ -1,9 +1,14 @@
 package nebula
 
 import (
+	"context"
+	"crypto/tls"
 	"encoding/binary"
 	"fmt"
+	"io"
+	"log"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"strconv"
@@ -101,12 +106,16 @@ func Main(config *Config, configTest bool, block bool, buildVersion string, logg
 	// tun config, listeners, anything modifying the computer should be below
 	////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
-	var tun *Tun
+	var inside Inside
 	if !configTest {
 		config.CatchHUP()
 
-		if tunFd != nil {
-			tun, err = newTunFromFd(
+		if config.GetBool("tun.proxy", false) {
+			inside = mock_inside{
+				cidr: tunCidr,
+			}
+		} else if tunFd != nil {
+			inside, err = newTunFromFd(
 				*tunFd,
 				tunCidr,
 				config.GetInt("tun.mtu", DEFAULT_MTU),
@@ -115,7 +124,7 @@ func Main(config *Config, configTest bool, block bool, buildVersion string, logg
 				config.GetInt("tun.tx_queue", 500),
 			)
 		} else {
-			tun, err = newTun(
+			inside, err = newTun(
 				config.GetString("tun.dev", ""),
 				tunCidr,
 				config.GetInt("tun.mtu", DEFAULT_MTU),
@@ -336,7 +345,7 @@ func Main(config *Config, configTest bool, block bool, buildVersion string, logg
 	pendingDeletionInterval := config.GetInt("timers.pending_deletion_interval", 10)
 	ifConfig := &InterfaceConfig{
 		HostMap:                 hostMap,
-		Inside:                  tun,
+		Inside:                  inside,
 		Outside:                 udpServer,
 		certState:               cs,
 		Cipher:                  config.GetString("cipher", "aes"),
@@ -393,6 +402,43 @@ func Main(config *Config, configTest bool, block bool, buildVersion string, logg
 	if amLighthouse && serveDns {
 		l.Debugln("Starting dns server")
 		go dnsMain(hostMap, config)
+	}
+
+	if config.GetBool("tun.proxy", false) {
+		time.Sleep(5 * time.Second)
+
+		httpClient := http.Client{
+			Transport: &http.Transport{
+				DialContext: func(_ context.Context, network, addr string) (net.Conn, error) {
+					return ifce.Dial(network, addr)
+				},
+				TLSClientConfig: &tls.Config{
+					InsecureSkipVerify: true,
+				},
+			},
+		}
+
+		doRequest := func(path string) {
+			fmt.Println("path: ", path)
+			resp, err := httpClient.Get(path)
+			if err != nil {
+				log.Println("http GET error: ", err)
+				return
+			}
+			defer resp.Body.Close()
+
+			_, err = io.Copy(os.Stdout, resp.Body)
+			if err != nil {
+				log.Println("body read err: ", err)
+			}
+
+			fmt.Println("")
+		}
+
+		doRequest("http://10.128.0.1/")      // you must have a nebula node at this address serving http content.
+		doRequest("https://142.250.66.206/") // google.com, but there's no such nebula node so this should time out.
+
+		fmt.Println("done!")
 	}
 
 	if block {
