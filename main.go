@@ -1,14 +1,9 @@
 package nebula
 
 import (
-	"context"
-	"crypto/tls"
 	"encoding/binary"
 	"fmt"
-	"io"
-	"log"
 	"net"
-	"net/http"
 	"os"
 	"os/signal"
 	"strconv"
@@ -31,7 +26,9 @@ type CommandRequest struct {
 	Callback chan error
 }
 
-func Main(config *Config, configTest bool, block bool, buildVersion string, logger *logrus.Logger, tunFd *int, commandChan <-chan CommandRequest) error {
+type Dialer func(network, addr string) (net.Conn, error)
+
+func Main(config *Config, configTest bool, block bool, buildVersion string, logger *logrus.Logger, tunFd *int, commandChan <-chan CommandRequest) (Dialer, error) {
 	l = logger
 	l.Formatter = &logrus.TextFormatter{
 		FullTimestamp: true,
@@ -41,7 +38,7 @@ func Main(config *Config, configTest bool, block bool, buildVersion string, logg
 	if configTest {
 		b, err := yaml.Marshal(config.Settings)
 		if err != nil {
-			return err
+			return nil, err
 		}
 
 		// Print the final config
@@ -50,7 +47,7 @@ func Main(config *Config, configTest bool, block bool, buildVersion string, logg
 
 	err := configLogger(config)
 	if err != nil {
-		return NewContextualError("Failed to configure the logger", nil, err)
+		return nil, NewContextualError("Failed to configure the logger", nil, err)
 	}
 
 	config.RegisterReloadCallback(func(c *Config) {
@@ -64,20 +61,20 @@ func Main(config *Config, configTest bool, block bool, buildVersion string, logg
 	trustedCAs, err = loadCAFromConfig(config)
 	if err != nil {
 		//The errors coming out of loadCA are already nicely formatted
-		return NewContextualError("Failed to load ca from config", nil, err)
+		return nil, NewContextualError("Failed to load ca from config", nil, err)
 	}
 	l.WithField("fingerprints", trustedCAs.GetFingerprints()).Debug("Trusted CA fingerprints")
 
 	cs, err := NewCertStateFromConfig(config)
 	if err != nil {
 		//The errors coming out of NewCertStateFromConfig are already nicely formatted
-		return NewContextualError("Failed to load certificate from config", nil, err)
+		return nil, NewContextualError("Failed to load certificate from config", nil, err)
 	}
 	l.WithField("cert", cs.certificate).Debug("Client nebula certificate")
 
 	fw, err := NewFirewallFromConfig(cs.certificate, config)
 	if err != nil {
-		return NewContextualError("Error while loading firewall rules", nil, err)
+		return nil, NewContextualError("Error while loading firewall rules", nil, err)
 	}
 	l.WithField("firewallHash", fw.GetRuleHash()).Info("Firewall started")
 
@@ -85,11 +82,11 @@ func Main(config *Config, configTest bool, block bool, buildVersion string, logg
 	tunCidr := cs.certificate.Details.Ips[0]
 	routes, err := parseRoutes(config, tunCidr)
 	if err != nil {
-		return NewContextualError("Could not parse tun.routes", nil, err)
+		return nil, NewContextualError("Could not parse tun.routes", nil, err)
 	}
 	unsafeRoutes, err := parseUnsafeRoutes(config, tunCidr)
 	if err != nil {
-		return NewContextualError("Could not parse tun.unsafe_routes", nil, err)
+		return nil, NewContextualError("Could not parse tun.unsafe_routes", nil, err)
 	}
 
 	ssh, err := sshd.NewSSHServer(l.WithField("subsystem", "sshd"))
@@ -97,7 +94,7 @@ func Main(config *Config, configTest bool, block bool, buildVersion string, logg
 	if config.GetBool("sshd.enabled", false) {
 		err = configSSH(ssh, config)
 		if err != nil {
-			return NewContextualError("Error while configuring the sshd", nil, err)
+			return nil, NewContextualError("Error while configuring the sshd", nil, err)
 		}
 	}
 
@@ -135,7 +132,7 @@ func Main(config *Config, configTest bool, block bool, buildVersion string, logg
 		}
 
 		if err != nil {
-			return NewContextualError("Failed to get a tun/tap device", nil, err)
+			return nil, NewContextualError("Failed to get a tun/tap device", nil, err)
 		}
 	}
 
@@ -146,7 +143,7 @@ func Main(config *Config, configTest bool, block bool, buildVersion string, logg
 	if !configTest {
 		udpServer, err = NewListener(config.GetString("listen.host", "0.0.0.0"), config.GetInt("listen.port", 0), udpQueues > 1)
 		if err != nil {
-			return NewContextualError("Failed to open udp listener", nil, err)
+			return nil, NewContextualError("Failed to open udp listener", nil, err)
 		}
 		udpServer.reloadConfig(config)
 	}
@@ -176,7 +173,7 @@ func Main(config *Config, configTest bool, block bool, buildVersion string, logg
 		for _, rawPreferredRange := range rawPreferredRanges {
 			_, preferredRange, err := net.ParseCIDR(rawPreferredRange)
 			if err != nil {
-				return NewContextualError("Failed to parse preferred ranges", nil, err)
+				return nil, NewContextualError("Failed to parse preferred ranges", nil, err)
 			}
 			preferredRanges = append(preferredRanges, preferredRange)
 		}
@@ -189,7 +186,7 @@ func Main(config *Config, configTest bool, block bool, buildVersion string, logg
 	if rawLocalRange != "" {
 		_, localRange, err := net.ParseCIDR(rawLocalRange)
 		if err != nil {
-			return NewContextualError("Failed to parse local_range", nil, err)
+			return nil, NewContextualError("Failed to parse local_range", nil, err)
 		}
 
 		// Check if the entry for local_range was already specified in
@@ -229,7 +226,7 @@ func Main(config *Config, configTest bool, block bool, buildVersion string, logg
 	if port == 0 && !configTest {
 		uPort, err := udpServer.LocalAddr()
 		if err != nil {
-			return NewContextualError("Failed to get listening port", nil, err)
+			return nil, NewContextualError("Failed to get listening port", nil, err)
 		}
 		port = int(uPort.Port)
 	}
@@ -246,10 +243,10 @@ func Main(config *Config, configTest bool, block bool, buildVersion string, logg
 	for i, host := range rawLighthouseHosts {
 		ip := net.ParseIP(host)
 		if ip == nil {
-			return NewContextualError("Unable to parse lighthouse host entry", m{"host": host, "entry": i + 1}, nil)
+			return nil, NewContextualError("Unable to parse lighthouse host entry", m{"host": host, "entry": i + 1}, nil)
 		}
 		if !tunCidr.Contains(ip) {
-			return NewContextualError("lighthouse host is not in our subnet, invalid", m{"vpnIp": ip, "network": tunCidr.String()}, nil)
+			return nil, NewContextualError("lighthouse host is not in our subnet, invalid", m{"vpnIp": ip, "network": tunCidr.String()}, nil)
 		}
 		lighthouseHosts[i] = ip2int(ip)
 	}
@@ -269,13 +266,13 @@ func Main(config *Config, configTest bool, block bool, buildVersion string, logg
 
 	remoteAllowList, err := config.GetAllowList("lighthouse.remote_allow_list", false)
 	if err != nil {
-		return NewContextualError("Invalid lighthouse.remote_allow_list", nil, err)
+		return nil, NewContextualError("Invalid lighthouse.remote_allow_list", nil, err)
 	}
 	lightHouse.SetRemoteAllowList(remoteAllowList)
 
 	localAllowList, err := config.GetAllowList("lighthouse.local_allow_list", true)
 	if err != nil {
-		return NewContextualError("Invalid lighthouse.local_allow_list", nil, err)
+		return nil, NewContextualError("Invalid lighthouse.local_allow_list", nil, err)
 	}
 	lightHouse.SetLocalAllowList(localAllowList)
 
@@ -283,7 +280,7 @@ func Main(config *Config, configTest bool, block bool, buildVersion string, logg
 	for k, v := range config.GetMap("static_host_map", map[interface{}]interface{}{}) {
 		vpnIp := net.ParseIP(fmt.Sprintf("%v", k))
 		if !tunCidr.Contains(vpnIp) {
-			return NewContextualError("static_host_map key is not in our subnet, invalid", m{"vpnIp": vpnIp, "network": tunCidr.String()}, nil)
+			return nil, NewContextualError("static_host_map key is not in our subnet, invalid", m{"vpnIp": vpnIp, "network": tunCidr.String()}, nil)
 		}
 		vals, ok := v.([]interface{})
 		if ok {
@@ -294,7 +291,7 @@ func Main(config *Config, configTest bool, block bool, buildVersion string, logg
 					ip := addr.IP
 					port, err := strconv.Atoi(parts[1])
 					if err != nil {
-						return NewContextualError("Static host address could not be parsed", m{"vpnIp": vpnIp}, err)
+						return nil, NewContextualError("Static host address could not be parsed", m{"vpnIp": vpnIp}, err)
 					}
 					lightHouse.AddRemote(ip2int(vpnIp), NewUDPAddr(ip2int(ip), uint16(port)), true)
 				}
@@ -307,7 +304,7 @@ func Main(config *Config, configTest bool, block bool, buildVersion string, logg
 				ip := addr.IP
 				port, err := strconv.Atoi(parts[1])
 				if err != nil {
-					return NewContextualError("Static host address could not be parsed", m{"vpnIp": vpnIp}, err)
+					return nil, NewContextualError("Static host address could not be parsed", m{"vpnIp": vpnIp}, err)
 				}
 				lightHouse.AddRemote(ip2int(vpnIp), NewUDPAddr(ip2int(ip), uint16(port)), true)
 			}
@@ -367,14 +364,14 @@ func Main(config *Config, configTest bool, block bool, buildVersion string, logg
 	case "chachapoly":
 		noiseEndianness = binary.LittleEndian
 	default:
-		return fmt.Errorf("unknown cipher: %v", ifConfig.Cipher)
+		return nil, fmt.Errorf("unknown cipher: %v", ifConfig.Cipher)
 	}
 
 	var ifce *Interface
 	if !configTest {
 		ifce, err = NewInterface(ifConfig)
 		if err != nil {
-			return fmt.Errorf("failed to initialize interface: %s", err)
+			return nil, fmt.Errorf("failed to initialize interface: %s", err)
 		}
 
 		ifce.RegisterConfigChangeCallbacks(config)
@@ -385,11 +382,11 @@ func Main(config *Config, configTest bool, block bool, buildVersion string, logg
 
 	err = startStats(config, configTest)
 	if err != nil {
-		return NewContextualError("Failed to start stats emitter", nil, err)
+		return nil, NewContextualError("Failed to start stats emitter", nil, err)
 	}
 
 	if configTest {
-		return nil
+		return nil, nil
 	}
 
 	//TODO: check if we _should_ be emitting stats
@@ -404,43 +401,6 @@ func Main(config *Config, configTest bool, block bool, buildVersion string, logg
 		go dnsMain(hostMap, config)
 	}
 
-	if config.GetBool("tun.proxy", false) {
-		time.Sleep(5 * time.Second)
-
-		httpClient := http.Client{
-			Transport: &http.Transport{
-				DialContext: func(_ context.Context, network, addr string) (net.Conn, error) {
-					return ifce.Dial(network, addr)
-				},
-				TLSClientConfig: &tls.Config{
-					InsecureSkipVerify: true,
-				},
-			},
-		}
-
-		doRequest := func(path string) {
-			fmt.Println("path: ", path)
-			resp, err := httpClient.Get(path)
-			if err != nil {
-				log.Println("http GET error: ", err)
-				return
-			}
-			defer resp.Body.Close()
-
-			_, err = io.Copy(os.Stdout, resp.Body)
-			if err != nil {
-				log.Println("body read err: ", err)
-			}
-
-			fmt.Println("")
-		}
-
-		doRequest("http://10.128.0.1/")      // you must have a nebula node at this address serving http content.
-		doRequest("https://142.250.66.206/") // google.com, but there's no such nebula node so this should time out.
-
-		fmt.Println("done!")
-	}
-
 	if block {
 		// Just sit here and be friendly, main thread.
 		shutdownBlock(ifce, sigChan, killChan)
@@ -448,7 +408,7 @@ func Main(config *Config, configTest bool, block bool, buildVersion string, logg
 		// Even though we aren't blocking we still want to shutdown gracefully
 		go shutdownBlock(ifce, sigChan, killChan)
 	}
-	return nil
+	return ifce.Dial, nil
 }
 
 func shutdownBlock(ifce *Interface, sigChan chan os.Signal, killChan chan CommandRequest) {
